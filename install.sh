@@ -40,7 +40,7 @@ echo "==> Creating '$PROJECT_NAME' from the awesm harness"
 git clone --depth 1 "$REPO_URL" "$PROJECT_NAME"
 
 # the bootstrap script is a tool, not part of the new project — drop its copy
-rm -f "$PROJECT_NAME/awesm-harness-install.sh"
+rm -f "$PROJECT_NAME/install.sh"
 
 # --- 2. rename harness -> project name (markdown docs only, safe) ----------
 echo "==> Renaming harness references to '$PROJECT_NAME'"
