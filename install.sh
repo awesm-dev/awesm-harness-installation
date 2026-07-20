@@ -130,6 +130,11 @@ for name, repo in marketplaces.items():
 
 data.setdefault("enabledPlugins", {})[os.environ["PLUGIN_KEY"]] = True
 
+# Pre-approve project .mcp.json MCP servers (the plugin ships github + notion) so
+# the auto-opened Claude Code session doesn't stop on the first-run MCP trust
+# prompt — which a piped `curl | bash` launch can't cleanly answer.
+data["enableAllProjectMcpServers"] = True
+
 with open(target, "w") as f:
     json.dump(data, f, indent=2)
     f.write("\n")
@@ -183,14 +188,15 @@ launch_claude_onboard() {
   elif [ -t 0 ]; then
     echo "==> Opening Claude Code…"
     exec claude "/awesm-harness:onboard"
+  elif [ -e /dev/tty ]; then
+    # Piped install (curl | bash): stdin is the pipe, but Claude Code attaches to
+    # the controlling terminal for its UI — so reconnect stdin to /dev/tty and it
+    # opens interactively just like a local run. (Startup prompts are pre-approved
+    # via settings: enableAllProjectMcpServers.)
+    echo "==> Opening Claude Code…"
+    exec claude "/awesm-harness:onboard" </dev/tty
   else
-    # Piped install (curl | bash) or no controlling terminal: do NOT auto-launch
-    # an interactive Claude session. A piped run can't answer Claude's startup
-    # prompts (MCP-server trust, permission approvals), so `exec claude` there
-    # just appears frozen. Industry standard for piped installers: set up, then
-    # print the next step — the user opens Claude in a real terminal where the
-    # prompts work. Local runs ([ -t 0 ] above) still auto-launch.
-    echo "==> Installed — open Claude Code yourself to start onboarding (see below)."
+    echo "==> No terminal available to open Claude Code interactively."
   fi
   echo
   echo "==> Ready at: $(pwd)"
