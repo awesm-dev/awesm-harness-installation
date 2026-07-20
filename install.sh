@@ -62,6 +62,13 @@ while [ $# -gt 0 ]; do
       shift ;;
   esac
 done
+case "$PROJECT_NAME" in
+  *.sh|*/*|-*)
+    echo "!! '$PROJECT_NAME' doesn't look like a project name (looks like a file/path/flag)." >&2
+    echo "   Usage: bash scripts/install.sh [project-name] [--scope project|local|user]" >&2
+    echo "   Example: bash scripts/install.sh my-project" >&2
+    exit 1 ;;
+esac
 case "$SCOPE" in
   project|local|user) ;;
   *) echo "!! --scope must be one of: project, local, user (got '$SCOPE')" >&2; exit 1 ;;
@@ -201,11 +208,12 @@ launch_claude_onboard() {
     echo "==> Installed — open Claude Code yourself to start onboarding (see below)."
   fi
   echo
-  echo "==> Ready at: $(pwd)"
-  echo "    To start onboarding:"
-  [ -n "$cd_hint" ] && echo "      $cd_hint"
-  echo "      claude                       # open a NEW Claude Code session here"
-  echo "      /awesm-harness:onboard       # start onboarding"
+  echo "==> Installed. Ready at: $(pwd)"
+  echo "    Start onboarding — run these in order:"
+  local n=1
+  if [ -n "$cd_hint" ]; then echo "      $n. $cd_hint"; n=$((n + 1)); fi
+  echo "      $n. claude                     # open Claude Code in this folder"; n=$((n + 1))
+  echo "      $n. /awesm-harness:onboard     # type this inside Claude to set up the project"
 }
 
 if [ -n "$PROJECT_NAME" ]; then
