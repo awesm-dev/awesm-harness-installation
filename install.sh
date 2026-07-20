@@ -80,7 +80,9 @@ command -v python3 >/dev/null 2>&1 || { echo "!! python3 is required. Install it
 # The marketplace repo is PRIVATE — plugin install uses the user's own git
 # credentials. Fail early with a clear message instead of a cryptic clone error
 # at plugin-install time.
-if ! git ls-remote "https://github.com/${MARKETPLACE_REPO}.git" HEAD >/dev/null 2>&1; then
+# GIT_TERMINAL_PROMPT=0 so an un-authed machine fails fast here instead of
+# hanging on an invisible username/password prompt (stderr is silenced below).
+if ! GIT_TERMINAL_PROMPT=0 git ls-remote "https://github.com/${MARKETPLACE_REPO}.git" HEAD >/dev/null 2>&1; then
   echo "!! Cannot reach the awesm harness repo (github.com/${MARKETPLACE_REPO})." >&2
   echo "   Your git credentials must have read access to it. Check:" >&2
   echo "     - you are logged in (gh auth status, or an SSH key / token is set up)" >&2
@@ -172,8 +174,9 @@ install_plugin_cli() {
 #   1. Already inside a Claude session (CLAUDECODE set) — pasting the curl line
 #      into the Claude prompt, or running it via `!`. Spawning a nested
 #      interactive claude here hangs/breaks. Print instructions instead.
-#   2. `curl ... | bash` — stdin is the pipe, not a TTY, so interactive claude
-#      can't attach. Reconnect it to the controlling terminal via </dev/tty.
+#   2. `curl ... | bash` — stdin is the pipe, and a Claude session launched from
+#      a pipe can't answer its own startup prompts (it freezes). So do NOT
+#      auto-launch when piped; print the command for the user to run instead.
 # The command is the PLUGIN-NAMESPACED /awesm-harness:onboard — a plugin's slash
 # commands register under <plugin>:<command>, so bare /onboard is an unknown
 # command and onboarding silently never runs.
@@ -188,15 +191,14 @@ launch_claude_onboard() {
   elif [ -t 0 ]; then
     echo "==> Opening Claude Code…"
     exec claude "/awesm-harness:onboard"
-  elif [ -e /dev/tty ]; then
-    # Piped install (curl | bash): stdin is the pipe, but Claude Code attaches to
-    # the controlling terminal for its UI — so reconnect stdin to /dev/tty and it
-    # opens interactively just like a local run. (Startup prompts are pre-approved
-    # via settings: enableAllProjectMcpServers.)
-    echo "==> Opening Claude Code…"
-    exec claude "/awesm-harness:onboard" </dev/tty
   else
-    echo "==> No terminal available to open Claude Code interactively."
+    # Piped install (curl | bash): do NOT auto-launch. Even reconnecting /dev/tty,
+    # an interactive Claude launched from a pipe cannot reliably take input at its
+    # startup prompts (MCP trust / permission approvals) and appears frozen —
+    # confirmed the hard way. Industry standard: a piped installer sets up, then
+    # prints the next command; the user opens Claude in a real terminal where the
+    # prompts work. Local runs ([ -t 0 ] above) still auto-launch.
+    echo "==> Installed — open Claude Code yourself to start onboarding (see below)."
   fi
   echo
   echo "==> Ready at: $(pwd)"
