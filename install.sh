@@ -127,15 +127,10 @@ try:
 except (FileNotFoundError, json.JSONDecodeError):
     data = {}
 
-marketplaces = {
-    "awesm": os.environ["MARKETPLACE_REPO"],
-    "caveman": os.environ["CAVEMAN_REPO"],
-    "thedotmack": os.environ["THEDOTMACK_REPO"],
-    "ponytail": os.environ["PONYTAIL_REPO"],
-}
+# Only the awesm marketplace — it hosts the harness AND its 3 dependency plugins
+# (caveman, claude-mem, ponytail), so registering it covers all four.
 known = data.setdefault("extraKnownMarketplaces", {})
-for name, repo in marketplaces.items():
-    known.setdefault(name, {"source": {"source": "github", "repo": repo}})
+known.setdefault("awesm", {"source": {"source": "github", "repo": os.environ["MARKETPLACE_REPO"]}})
 
 data.setdefault("enabledPlugins", {})[os.environ["PLUGIN_KEY"]] = True
 
@@ -163,9 +158,10 @@ install_plugin_cli() {
     echo "    Install Claude Code, then run: claude plugin install $PLUGIN_KEY --scope $SCOPE" >&2
     return 0
   fi
-  for repo in "$MARKETPLACE_REPO" "$CAVEMAN_REPO" "$THEDOTMACK_REPO" "$PONYTAIL_REPO"; do
-    claude plugin marketplace add "$repo" >/dev/null 2>&1 || true
-  done
+  # The awesm marketplace hosts the harness AND its 3 dependency plugins
+  # (caveman, claude-mem, ponytail), so this single add covers all four —
+  # dependency resolution then installs them automatically.
+  claude plugin marketplace add "$MARKETPLACE_REPO" >/dev/null 2>&1 || true
   echo "==> Installing $PLUGIN_KEY (+ dependencies) at --scope $SCOPE"
   if ! claude plugin install "$PLUGIN_KEY" --scope "$SCOPE"; then
     echo "!! 'claude plugin install $PLUGIN_KEY' failed — check marketplace access." >&2
@@ -209,11 +205,12 @@ launch_claude_onboard() {
   fi
   echo
   echo "==> Installed. Ready at: $(pwd)"
-  echo "    Start onboarding — run these in order:"
-  local n=1
-  if [ -n "$cd_hint" ]; then echo "      $n. $cd_hint"; n=$((n + 1)); fi
-  echo "      $n. claude                     # open Claude Code in this folder"; n=$((n + 1))
-  echo "      $n. /awesm-harness:onboard     # type this inside Claude to set up the project"
+  echo "    Copy and run this one line to start onboarding:"
+  if [ -n "$cd_hint" ]; then
+    echo "      cd '$cd_hint' && claude \"/awesm-harness:onboard\""
+  else
+    echo "      claude \"/awesm-harness:onboard\""
+  fi
 }
 
 if [ -n "$PROJECT_NAME" ]; then
@@ -237,7 +234,7 @@ if [ -n "$PROJECT_NAME" ]; then
   install_plugin_cli
 
   echo "==> '$PROJECT_NAME' is ready."
-  launch_claude_onboard "cd '$PROJECT_NAME'   # (from where you ran this)"
+  launch_claude_onboard "$PROJECT_NAME"
 
 else
   # ===========================================================================
