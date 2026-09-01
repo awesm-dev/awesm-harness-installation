@@ -84,6 +84,39 @@ fi
 command -v git >/dev/null 2>&1 || { echo "!! git is required. Install git and re-run." >&2; exit 1; }
 command -v python3 >/dev/null 2>&1 || { echo "!! python3 is required. Install it and re-run." >&2; exit 1; }
 
+# --- ensure GitHub access (gh installed + logged in + git over HTTPS) ----------
+# The harness repo is PRIVATE, so cloning it needs a GitHub login; the dependency
+# repos are public but get cloned via ssh-style URLs, which need a key unless git
+# is pointed at HTTPS. Make all of that automatic: install gh, log in (browser),
+# wire git to gh's HTTPS credentials. Needs a real terminal — run by pasting into
+# your terminal (e.g. `bash <(curl -fsSL <url>)`), NOT a bare `curl | bash` pipe,
+# which has no terminal for the browser login to attach to.
+ensure_github_access() {
+  if ! command -v gh >/dev/null 2>&1; then
+    echo "==> GitHub CLI (gh) not found — installing…"
+    if command -v brew >/dev/null 2>&1; then brew install gh
+    elif command -v apt-get >/dev/null 2>&1; then sudo apt-get update -y && sudo apt-get install -y gh
+    else echo "!! Install GitHub CLI (https://cli.github.com), then re-run." >&2; exit 1; fi
+  fi
+  if ! gh auth status >/dev/null 2>&1; then
+    if [ -t 0 ]; then
+      echo "==> Logging in to GitHub (a browser will open — authorize once)…"
+      gh auth login --hostname github.com --git-protocol https --web \
+        || { echo "!! GitHub login didn't finish. Run 'gh auth login' then re-run." >&2; exit 1; }
+    else
+      echo "!! Not logged in to GitHub, and no terminal to open the login." >&2
+      echo "   Run 'gh auth login' in your terminal, then re-run this installer" >&2
+      echo "   (or paste it as: bash <(curl -fsSL <installer-url>) <name>)." >&2
+      exit 1
+    fi
+  fi
+  # git uses gh's HTTPS credentials; rewrite ssh-style GitHub URLs to HTTPS so
+  # dependency clones don't fall back to SSH (which needs a key).
+  gh auth setup-git >/dev/null 2>&1 || true
+  git config --global url."https://github.com/".insteadOf "git@github.com:" 2>/dev/null || true
+}
+ensure_github_access
+
 # The marketplace repo is PRIVATE — plugin install uses the user's own git
 # credentials. Fail early with a clear message instead of a cryptic clone error
 # at plugin-install time.
