@@ -35,7 +35,10 @@
 set -euo pipefail
 
 MARKETPLACE_REPO="awesm-dev/awesm-claude-harness"
-PLUGIN_KEY="awesm-harness@awesm"
+# Two harnesses live in this marketplace. --agent picks the agent-builder one.
+#   awesm-harness        co-pilot work (web app / automation / marketing) + deploy
+#   awesm-agent  builds a Hermes agent profile; no deploy path
+PLUGIN_NAME="awesm-harness"
 # awesm-harness depends on these independent plugins (caveman: output
 # compression, claude-mem: cross-session memory, ponytail: minimal-code
 # discipline). Their marketplaces must be known BEFORE install or the
@@ -52,8 +55,11 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --scope) SCOPE="${2:-}"; shift 2 ;;
     --scope=*) SCOPE="${1#--scope=}"; shift ;;
+    --agent|--agent-harness) PLUGIN_NAME="awesm-agent"; shift ;;
     -h|--help)
-      echo "Usage: bash scripts/install.sh [project-name] [--scope project|local|user]" >&2
+      echo "Usage: bash scripts/install.sh [project-name] [--agent] [--scope project|local|user]" >&2
+      echo "  --agent   install awesm-agent (build a Hermes agent) instead of" >&2
+      echo "            awesm-harness (co-pilot work: web app / automation / marketing)" >&2
       exit 0 ;;
     *)
       if [ -z "$PROJECT_NAME" ]; then PROJECT_NAME="$1"
@@ -62,6 +68,7 @@ while [ $# -gt 0 ]; do
       shift ;;
   esac
 done
+PLUGIN_KEY="$PLUGIN_NAME@awesm"
 case "$PROJECT_NAME" in
   *.sh|*/*|-*)
     echo "!! '$PROJECT_NAME' doesn't look like a project name (looks like a file/path/flag)." >&2
@@ -180,7 +187,7 @@ PYEOF
 
 # --- actually install the plugin (not just declare it) -------------------------
 # merge_settings only WRITES the enable block into settings.json — that declares
-# the plugin but does NOT install its machinery, so /awesm-harness:onboard would
+# the plugin but does NOT install its machinery, so /$PLUGIN_NAME:onboard would
 # not exist and onboarding never starts. These CLI calls do the real install at
 # the chosen scope. Dependency plugins (caveman, claude-mem, ponytail) auto-
 # install once their marketplaces are registered here. Idempotent: marketplace
@@ -203,6 +210,85 @@ install_plugin_cli() {
   fi
 }
 
+# --- ensure a Hermes runtime exists on this machine ----------------------------
+# Projects built with the AGENT harness are Hermes agent profiles, and testing one
+# (/awesm-agent:local-deploy) needs a working `hermes`. Two supported shapes:
+#   native — `hermes` already on PATH; nothing to do.
+#   docker — the official image as a long-lived container named `hermes`, with the
+#            host's ~/.hermes bind-mounted as its data dir, so profiles, .env files
+#            and sessions live at the same host paths either way.
+# Never fatal: the harness installs fine without Hermes, and a missing runtime only
+# bites at local-deploy time, which re-checks and says so.
+HERMES_IMAGE="nousresearch/hermes-agent:latest"
+HERMES_CONTAINER="hermes"
+ensure_hermes() {
+  # Only the agent harness builds Hermes profiles — co-pilot projects never need
+  # a Hermes runtime, so don't pull a container onto those machines.
+  if [ "$PLUGIN_NAME" != "awesm-agent" ]; then
+    return 0
+  fi
+  if command -v hermes >/dev/null 2>&1; then
+    echo "==> Hermes found on PATH — using the native install."
+    return 0
+  fi
+  if ! command -v docker >/dev/null 2>&1; then
+    echo "==> Hermes isn't installed here, and Docker isn't available to run it." >&2
+    echo "    Install Docker (https://docs.docker.com/get-docker/) and re-run this" >&2
+    echo "    installer — /awesm-agent:local-deploy needs one of the two to test" >&2
+    echo "    your agent." >&2
+    return 0
+  fi
+  if ! docker info >/dev/null 2>&1; then
+    echo "==> Can't talk to Docker (daemon stopped, or your user isn't in the 'docker'" >&2
+    echo "    group). Start Docker / fix access, then re-run this installer to bring" >&2
+    echo "    Hermes up." >&2
+    return 0
+  fi
+
+  if docker ps --format '{{.Names}}' | grep -qx "$HERMES_CONTAINER"; then
+    echo "==> Hermes container '$HERMES_CONTAINER' already running."
+    return 0
+  fi
+  if docker ps -a --format '{{.Names}}' | grep -qx "$HERMES_CONTAINER"; then
+    echo "==> Starting the existing Hermes container…"
+    docker start "$HERMES_CONTAINER" >/dev/null && return 0
+    echo "!! Could not start the existing '$HERMES_CONTAINER' container." >&2
+    return 0
+  fi
+
+  echo "==> No Hermes on this machine — bringing up $HERMES_IMAGE"
+  # ~/.hermes is bind-mounted as the container's data dir. The image's own user is
+  # uid 10000, so WITHOUT --user the container writes root-ish files into the host's
+  # home and locks the human out of their own ~/.hermes (mode 700, uid 10000) — the
+  # native CLI then dies reading ~/.hermes/.container-mode. Create the dir as the
+  # host user and make the container run as them.
+  mkdir -p "$HOME/.hermes"
+  docker pull "$HERMES_IMAGE" || { echo "!! Could not pull $HERMES_IMAGE." >&2; return 0; }
+  if ! docker run -d \
+      --name "$HERMES_CONTAINER" \
+      --restart unless-stopped \
+      --user "$(id -u):$(id -g)" \
+      -v "$HOME/.hermes:/opt/data" \
+      -p 8642:8642 \
+      "$HERMES_IMAGE" gateway run >/dev/null; then
+    echo "!! Could not start the Hermes container." >&2
+    return 0
+  fi
+  echo "==> Hermes container '$HERMES_CONTAINER' is up (API on :8642)."
+
+  # First-run config (model choice + API keys) is an interactive wizard — only
+  # sane with a real terminal. Piped installs get the command to paste instead.
+  if [ -t 0 ] && [ -z "${CLAUDECODE:-}" ]; then
+    echo "==> Running Hermes first-time setup…"
+    docker run -it --rm --user "$(id -u):$(id -g)" \
+      -v "$HOME/.hermes:/opt/data" "$HERMES_IMAGE" setup || true
+  else
+    echo "    One-time Hermes setup — run this in your terminal before testing an agent:"
+    echo "      docker run -it --rm --user \$(id -u):\$(id -g) \\"
+    echo "        -v ~/.hermes:/opt/data $HERMES_IMAGE setup"
+  fi
+}
+
 # --- launch Claude Code + onboarding -------------------------------------------
 # Launching an interactive Claude Code session needs a real terminal AND must
 # not be nested inside an existing one. Two problem cases the naive `exec
@@ -213,7 +299,7 @@ install_plugin_cli() {
 #   2. `curl ... | bash` — stdin is the pipe, and a Claude session launched from
 #      a pipe can't answer its own startup prompts (it freezes). So do NOT
 #      auto-launch when piped; print the command for the user to run instead.
-# The command is the PLUGIN-NAMESPACED /awesm-harness:onboard — a plugin's slash
+# The command is the PLUGIN-NAMESPACED /$PLUGIN_NAME:onboard — a plugin's slash
 # commands register under <plugin>:<command>, so bare /onboard is an unknown
 # command and onboarding silently never runs.
 # $1: extra instruction line to print in the folder ("cd '<name>'" for fresh
@@ -226,7 +312,7 @@ launch_claude_onboard() {
     echo "==> Claude Code isn't installed on PATH."
   elif [ -t 0 ]; then
     echo "==> Opening Claude Code…"
-    exec claude "/awesm-harness:onboard"
+    exec claude "/$PLUGIN_NAME:onboard"
   else
     # Piped install (curl | bash): do NOT auto-launch. Even reconnecting /dev/tty,
     # an interactive Claude launched from a pipe cannot reliably take input at its
@@ -240,9 +326,9 @@ launch_claude_onboard() {
   echo "==> Installed. Ready at: $(pwd)"
   echo "    Copy and run this one line to start onboarding:"
   if [ -n "$cd_hint" ]; then
-    echo "      cd '$cd_hint' && claude \"/awesm-harness:onboard\""
+    echo "      cd '$cd_hint' && claude \"/$PLUGIN_NAME:onboard\""
   else
-    echo "      claude \"/awesm-harness:onboard\""
+    echo "      claude \"/$PLUGIN_NAME:onboard\""
   fi
 }
 
@@ -265,6 +351,8 @@ if [ -n "$PROJECT_NAME" ]; then
   echo "==> Enabling awesm-harness at --scope $SCOPE ($SETTINGS_REL)"
   merge_settings "$SETTINGS_REL"
   install_plugin_cli
+
+  ensure_hermes
 
   echo "==> '$PROJECT_NAME' is ready."
   launch_claude_onboard "$PROJECT_NAME"
@@ -309,6 +397,7 @@ else
   echo "==> Adopting awesm-harness into $(pwd) at --scope $SCOPE ($SETTINGS_REL)"
   merge_settings "$SETTINGS_REL"
   install_plugin_cli
+  ensure_hermes
   echo "==> Done."
 
   launch_claude_onboard ""
