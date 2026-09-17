@@ -34,6 +34,53 @@
 
 set -euo pipefail
 
+# helper: is a command available on PATH?
+have() { command -v "$1" >/dev/null 2>&1; }
+
+# ---------------------------------------------------------------------------
+# Package manager. This script ran only on macOS for its first months: every
+# install was `brew`, so on Fedora and Ubuntu it installed nothing, printed
+# nothing alarming, and exited 0 — a clean run that had done no work. Every
+# install below goes through pkg_install so the failure is at least loud.
+# ---------------------------------------------------------------------------
+if   have brew;    then PKG=brew
+elif have dnf;     then PKG=dnf
+elif have apt-get; then PKG=apt
+elif have yum;     then PKG=yum
+elif have apk;     then PKG=apk
+else                    PKG=none; fi
+echo "==> package manager: $PKG"
+
+# sudo only when there is a human to answer the prompt. Run from Claude Code or a
+# pipe, a sudo prompt hangs or fails; print the command instead so the person runs it.
+INTERACTIVE=0; [ -t 0 ] && [ -z "${CLAUDECODE:-}" ] && INTERACTIVE=1
+SUDO=""; [ "$(id -u)" -ne 0 ] && have sudo && SUDO="sudo"
+
+# pkg_install <brew-name> <dnf-name> <apt-name> <apk-name>
+# Any name may be "-" to mean "not available via that manager".
+pkg_install() {
+  local brew_n="$1" dnf_n="$2" apt_n="$3" apk_n="$4" cmd=""
+  case "$PKG" in
+    brew) [ "$brew_n" != "-" ] && cmd="brew install $brew_n" ;;
+    dnf)  [ "$dnf_n"  != "-" ] && cmd="$SUDO dnf install -y $dnf_n" ;;
+    yum)  [ "$dnf_n"  != "-" ] && cmd="$SUDO yum install -y $dnf_n" ;;
+    apt)  [ "$apt_n"  != "-" ] && cmd="$SUDO apt-get install -y $apt_n" ;;
+    apk)  [ "$apk_n"  != "-" ] && cmd="$SUDO apk add $apk_n" ;;
+  esac
+  if [ -z "$cmd" ]; then
+    echo "!! no install path for '$brew_n' with $PKG — install it by hand and re-run." >&2
+    return 1
+  fi
+  if [ -n "$SUDO" ] && [ "$INTERACTIVE" -eq 0 ] && [ "$PKG" != "brew" ]; then
+    echo "!! needs sudo, and there is no terminal to type the password into." >&2
+    echo "   Run this yourself, then re-run init.sh:" >&2
+    echo "     $cmd" >&2
+    return 1
+  fi
+  echo "==> $cmd"; $cmd
+}
+
+
 MARKETPLACE_REPO="awesm-dev/awesm-claude-harness"
 # Two harnesses live in this marketplace. --agent picks the agent-builder one.
 #   awesm-harness        co-pilot work (web app / automation / marketing) + deploy
@@ -231,17 +278,56 @@ ensure_hermes() {
     echo "==> Hermes found on PATH — using the native install."
     return 0
   fi
-  if ! command -v docker >/dev/null 2>&1; then
-    echo "==> Hermes isn't installed here, and Docker isn't available to run it." >&2
-    echo "    Install Docker (https://docs.docker.com/get-docker/) and re-run this" >&2
-    echo "    installer — /awesm-agent:local-deploy needs one of the two to test" >&2
-    echo "    your agent." >&2
+  # ~/.hermes must belong to YOU. An earlier container run without --user leaves it
+  # owned by the image's uid 10000, mode 700: the human is locked out of their own
+  # data dir, and a container now running as the host user cannot write it either.
+  # `mkdir -p` on such a directory succeeds silently and repairs nothing, so check.
+  if [ -d "$HOME/.hermes" ] && [ ! -w "$HOME/.hermes" ]; then
+    echo "!! ~/.hermes exists but you cannot write to it" >&2
+    echo "   ($(stat -c '%U (uid %u) %A' "$HOME/.hermes" 2>/dev/null || stat -f '%Su %Sp' "$HOME/.hermes"))." >&2
+    echo "   A previous Hermes container ran as its own uid and took the directory." >&2
+    echo "   Take it back, then re-run init.sh:" >&2
+    echo "     sudo chown -R \$(id -u):\$(id -g) ~/.hermes && chmod u+rwx ~/.hermes" >&2
     return 0
   fi
+
+  if ! command -v docker >/dev/null 2>&1; then
+    echo "==> Hermes isn't installed here, and neither is Docker."
+    case "$PKG" in
+      brew)
+        echo "!! Docker Desktop is a GUI app on macOS and cannot be installed from here." >&2
+        echo "   Install it from https://docs.docker.com/desktop/setup/install/mac-install/" >&2
+        echo "   then re-run init.sh." >&2
+        return 0 ;;
+      dnf|yum)  pkg_install - moby-engine - - || pkg_install - docker - - || return 0 ;;
+      apt)      pkg_install - - docker.io - || return 0 ;;
+      apk)      pkg_install - - - docker || return 0 ;;
+      *)        echo "!! No known way to install Docker here. https://docs.docker.com/get-docker/" >&2; return 0 ;;
+    esac
+    if have systemctl; then
+      if [ "$INTERACTIVE" -eq 1 ] || [ -z "$SUDO" ]; then
+        $SUDO systemctl enable --now docker || true
+      else
+        echo "   Then start it:  $SUDO systemctl enable --now docker" >&2
+      fi
+    fi
+    if ! id -nG "$USER" | tr ' ' '\n' | grep -qx docker; then
+      echo "   And put yourself in the docker group (takes effect at your NEXT login):" >&2
+      echo "     $SUDO usermod -aG docker $USER" >&2
+      echo "   Until then, docker commands need sudo — re-run init.sh after logging in again." >&2
+      return 0
+    fi
+  fi
   if ! docker info >/dev/null 2>&1; then
-    echo "==> Can't talk to Docker (daemon stopped, or your user isn't in the 'docker'" >&2
-    echo "    group). Start Docker / fix access, then re-run this installer to bring" >&2
-    echo "    Hermes up." >&2
+    echo "==> Docker is installed but not reachable." >&2
+    if have systemctl && ! systemctl is-active --quiet docker 2>/dev/null; then
+      echo "   The daemon is stopped:  $SUDO systemctl enable --now docker" >&2
+    fi
+    if ! id -nG "$USER" | tr ' ' '\n' | grep -qx docker; then
+      echo "   You are not in the docker group:  $SUDO usermod -aG docker $USER" >&2
+      echo "   (log out and back in for it to apply)" >&2
+    fi
+    echo "   Fix the above, then re-run init.sh to bring Hermes up." >&2
     return 0
   fi
 
