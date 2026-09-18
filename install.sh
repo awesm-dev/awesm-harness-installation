@@ -381,17 +381,23 @@ ensure_hermes() {
   fi
   echo "==> Hermes container '$HERMES_CONTAINER' is up (API on :8642)."
 
-  # First-run config (model choice + API keys) is an interactive wizard — only
-  # sane with a real terminal. Piped installs get the command to paste instead.
-  if [ -t 0 ] && [ -z "${CLAUDECODE:-}" ]; then
-    echo "==> Running Hermes first-time setup…"
-    docker run -it --rm -e HERMES_UID="$(id -u)" -e HERMES_GID="$(id -g)" \
-      -v "$HOME/.hermes:/opt/data" "$HERMES_IMAGE" setup || true
-  else
-    echo "    One-time Hermes setup — run this in your terminal before testing an agent:"
-    echo "      docker run -it --rm -e HERMES_UID=\$(id -u) -e HERMES_GID=\$(id -g) \\"
-    echo "        -v ~/.hermes:/opt/data $HERMES_IMAGE setup"
+  # First-run config. Hermes ships `setup --non-interactive` ("use defaults/env
+  # vars"), so the wizard was never mandatory — the harness simply never used the
+  # flag, and every user was made to sit through it. Run it non-interactively here.
+  #
+  # Note what this layer is: the ROOT/default profile. /awesm-agent:local-deploy
+  # installs the agent as its own `<slug>-local` profile, which carries its own
+  # config.yaml (model pinned) and its own .env — and Hermes resolves env per
+  # profile, so a profile never reads the root .env. Configuring the root by hand
+  # therefore sets something the agent does not read. Whether the agent can
+  # actually think is doctor's call, against the installed profile.
+  if docker exec "$HERMES_CONTAINER" hermes setup --non-interactive >/dev/null 2>&1; then
+    return 0
   fi
+  echo "==> Hermes is up, but 'hermes setup --non-interactive' did not succeed." >&2
+  echo "    Run the wizard yourself to see what it wants:" >&2
+  echo "      docker exec -it $HERMES_CONTAINER hermes setup" >&2
+  return 10
 }
 
 # --- launch Claude Code + onboarding -------------------------------------------
