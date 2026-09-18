@@ -253,23 +253,42 @@ PYEOF
 # the chosen scope. Dependency plugins (caveman, claude-mem, ponytail) auto-
 # install once their marketplaces are registered here. Idempotent: marketplace
 # add is a no-op when already present; install is safe to re-run.
-# Is the plugin actually ENABLED here? `claude plugin install` can succeed and
-# leave the plugin installed-but-disabled — settings written to one place, the
-# install landing in another. The symptom is a slash command that does not exist
-# ("Unknown command: /<plugin>:onboard") straight after a green install, which is
-# exactly what a user hit. Parse the real state rather than trusting exit codes.
-plugin_enabled() {
-  command -v claude >/dev/null 2>&1 || return 1
-  claude plugin list 2>/dev/null | awk -v key="$PLUGIN_KEY" '
-    $0 ~ /^[[:space:]]*.[[:space:]]*[A-Za-z0-9._-]+@[A-Za-z0-9._-]+[[:space:]]*$/ {
-      cur = $NF
-    }
-    /Status:/ && cur == key {
-      if ($0 ~ /enabled/ && $0 !~ /disabled/) { found = 1 }
-    }
-    END { exit(found ? 0 : 1) }
-  '
+# Is the plugin installed and enabled FOR THIS PROJECT?
+#
+# `claude plugin list` is MACHINE-WIDE: it lists every project's installs, so
+# parsing it answers "is this plugin enabled somewhere", not "here". Two projects
+# on different versions both show up, which looks like duplicates and can green-light
+# a project where the plugin is not enabled at all. The authoritative record is
+# ~/.claude/plugins/installed_plugins.json, keyed by projectPath — filter on $PWD.
+# Enablement itself lives in the project's own settings file.
+plugin_installed_version() {
+  PLUGIN_KEY="$PLUGIN_KEY" HERE="$PWD" python3 - <<'PYEOF' 2>/dev/null
+import json, os
+try:
+    d = json.load(open(os.path.expanduser("~/.claude/plugins/installed_plugins.json")))
+except Exception:
+    raise SystemExit(0)
+here = os.path.realpath(os.environ["HERE"])
+for e in d.get("plugins", {}).get(os.environ["PLUGIN_KEY"], []):
+    p = e.get("projectPath")
+    if p and os.path.realpath(p) == here:
+        print(e.get("version", ""))
+        break
+PYEOF
 }
+
+plugin_enabled() {
+  [ -n "$(plugin_installed_version)" ] || return 1
+  TARGET="$SETTINGS_REL" PLUGIN_KEY="$PLUGIN_KEY" python3 - <<'PYEOF' 2>/dev/null
+import json, os, sys
+try:
+    d = json.load(open(os.environ["TARGET"]))
+except Exception:
+    sys.exit(1)
+sys.exit(0 if d.get("enabledPlugins", {}).get(os.environ["PLUGIN_KEY"]) is True else 1)
+PYEOF
+}
+
 
 install_plugin_cli() {
   if ! command -v claude >/dev/null 2>&1; then
@@ -282,6 +301,45 @@ install_plugin_cli() {
   # dependency resolution then installs them automatically.
   claude plugin marketplace add "$MARKETPLACE_REPO" >/dev/null 2>&1 || true
   echo "==> Installing $PLUGIN_KEY (+ dependencies) at --scope $SCOPE"
+  # `claude plugin install` short-circuits on an existing install ("already
+  # installed") and does NOT upgrade it. Re-running the installer after a release
+  # therefore left the OLD version in place while the marketplace cache moved on —
+  # the user runs the bootstrap, is told everything is installed, and is still on
+  # last week's plugin. Worse, repeated installs can leave two versions enabled
+  # side by side with no defined winner. So update first, and let install handle
+  # the not-yet-installed case.
+  # Plugin installs live in ~/.claude/plugins/installed_plugins.json, keyed by
+  # project path and PINNED to a cached copy of one version. Deleting and
+  # re-cloning the repo does not touch that record, so a "fresh" test is not
+  # fresh: `claude plugin install` sees the old entry, prints "already installed",
+  # and leaves the stale version in place while the marketplace has moved on.
+  # `claude plugin update` needs a restart to apply and does not help an installer
+  # that is about to hand over a session. So compare versions and, when they
+  # differ, uninstall the stale copy before installing — that is the only thing
+  # that reliably lands the current version in this run.
+  want="$(cat "$HOME/.claude/plugins/marketplaces/awesm/plugins/$PLUGIN_NAME/.claude-plugin/plugin.json" 2>/dev/null \
+          | python3 -c 'import json,sys; print(json.load(sys.stdin).get("version",""))' 2>/dev/null)"
+  have="$(plugin_installed_version)"
+  if [ -n "$want" ] && [ -n "$have" ] && [ "$have" != "$want" ]; then
+    echo "==> Installed $PLUGIN_KEY is [$have], marketplace has [$want] — replacing."
+    # `uninstall` REFUSES while the plugin is enabled at project scope, and
+    # merge_settings enabled it seconds ago — so drop the key first, uninstall,
+    # install, then let merge_settings put it back at the end of this function.
+    TARGET="$SETTINGS_REL" PLUGIN_KEY="$PLUGIN_KEY" python3 <<'PYEOF' 2>/dev/null || true
+import json, os
+t = os.environ["TARGET"]
+try:
+    with open(t) as f: data = json.load(f)
+except Exception:
+    raise SystemExit(0)
+data.get("enabledPlugins", {}).pop(os.environ["PLUGIN_KEY"], None)
+with open(t, "w") as f:
+    json.dump(data, f, indent=2); f.write("\n")
+PYEOF
+    if ! claude plugin uninstall "$PLUGIN_KEY" 2>&1 | sed 's/^/    /'; then
+      echo "   (uninstall did not succeed — continuing; the version report below is authoritative)" >&2
+    fi
+  fi
   if ! claude plugin install "$PLUGIN_KEY" --scope "$SCOPE"; then
     echo "!! 'claude plugin install $PLUGIN_KEY' failed — check marketplace access." >&2
     echo "   Settings were still written; fix access and re-run the install command." >&2
@@ -296,6 +354,15 @@ install_plugin_cli() {
       claude plugin enable "$dep" >/dev/null 2>&1 || true
     done
   fi
+  # Enablement was stripped above if we replaced a stale copy — put it back, and
+  # re-assert the dependency keys, before reporting.
+  merge_settings "$SETTINGS_REL"
+
+  # Report the version live IN THIS PROJECT. Other projects pinned to other
+  # versions are normal and none of this run's business.
+  live="$(plugin_installed_version)"
+  [ -n "$live" ] && echo "==> $PLUGIN_KEY $live is live in $(pwd)"
+
   if ! plugin_enabled; then
     echo "!! $PLUGIN_KEY is installed but not loading, so its slash commands do not" >&2
     echo "   exist and onboarding cannot run. Most often a DEPENDENCY is installed but" >&2
