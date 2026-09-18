@@ -288,7 +288,7 @@ ensure_hermes() {
     echo "   A previous Hermes container ran as its own uid and took the directory." >&2
     echo "   Take it back, then re-run init.sh:" >&2
     echo "     sudo chown -R \$(id -u):\$(id -g) ~/.hermes && chmod u+rwx ~/.hermes" >&2
-    return 0
+    return 1
   fi
 
   if ! command -v docker >/dev/null 2>&1; then
@@ -298,11 +298,11 @@ ensure_hermes() {
         echo "!! Docker Desktop is a GUI app on macOS and cannot be installed from here." >&2
         echo "   Install it from https://docs.docker.com/desktop/setup/install/mac-install/" >&2
         echo "   then re-run init.sh." >&2
-        return 0 ;;
-      dnf|yum)  pkg_install - moby-engine - - || pkg_install - docker - - || return 0 ;;
-      apt)      pkg_install - - docker.io - || return 0 ;;
-      apk)      pkg_install - - - docker || return 0 ;;
-      *)        echo "!! No known way to install Docker here. https://docs.docker.com/get-docker/" >&2; return 0 ;;
+        return 1 ;;
+      dnf|yum)  pkg_install - moby-engine - - || pkg_install - docker - - || return 1 ;;
+      apt)      pkg_install - - docker.io - || return 1 ;;
+      apk)      pkg_install - - - docker || return 1 ;;
+      *)        echo "!! No known way to install Docker here. https://docs.docker.com/get-docker/" >&2; return 1 ;;
     esac
     if have systemctl; then
       if [ "$INTERACTIVE" -eq 1 ] || [ -z "$SUDO" ]; then
@@ -315,7 +315,7 @@ ensure_hermes() {
       echo "   And put yourself in the docker group (takes effect at your NEXT login):" >&2
       echo "     $SUDO usermod -aG docker $USER" >&2
       echo "   Until then, docker commands need sudo — re-run init.sh after logging in again." >&2
-      return 0
+      return 1
     fi
   fi
   if ! docker info >/dev/null 2>&1; then
@@ -328,7 +328,7 @@ ensure_hermes() {
       echo "   (log out and back in for it to apply)" >&2
     fi
     echo "   Fix the above, then re-run init.sh to bring Hermes up." >&2
-    return 0
+    return 1
   fi
 
   if docker ps --format '{{.Names}}' | grep -qx "$HERMES_CONTAINER"; then
@@ -339,7 +339,7 @@ ensure_hermes() {
     echo "==> Starting the existing Hermes container…"
     docker start "$HERMES_CONTAINER" >/dev/null && return 0
     echo "!! Could not start the existing '$HERMES_CONTAINER' container." >&2
-    return 0
+    return 1
   fi
 
   echo "==> No Hermes on this machine — bringing up $HERMES_IMAGE"
@@ -349,7 +349,7 @@ ensure_hermes() {
   # native CLI then dies reading ~/.hermes/.container-mode. Create the dir as the
   # host user and make the container run as them.
   mkdir -p "$HOME/.hermes"
-  docker pull "$HERMES_IMAGE" || { echo "!! Could not pull $HERMES_IMAGE." >&2; return 0; }
+  docker pull "$HERMES_IMAGE" || { echo "!! Could not pull $HERMES_IMAGE." >&2; return 1; }
   if ! docker run -d \
       --name "$HERMES_CONTAINER" \
       --restart unless-stopped \
@@ -358,7 +358,7 @@ ensure_hermes() {
       -p 8642:8642 \
       "$HERMES_IMAGE" gateway run >/dev/null; then
     echo "!! Could not start the Hermes container." >&2
-    return 0
+    return 1
   fi
   echo "==> Hermes container '$HERMES_CONTAINER' is up (API on :8642)."
 
@@ -438,7 +438,7 @@ if [ -n "$PROJECT_NAME" ]; then
   merge_settings "$SETTINGS_REL"
   install_plugin_cli
 
-  ensure_hermes
+  ensure_hermes || true
 
   echo "==> '$PROJECT_NAME' is ready."
   launch_claude_onboard "$PROJECT_NAME"
@@ -483,7 +483,7 @@ else
   echo "==> Adopting awesm-harness into $(pwd) at --scope $SCOPE ($SETTINGS_REL)"
   merge_settings "$SETTINGS_REL"
   install_plugin_cli
-  ensure_hermes
+  ensure_hermes || true
   echo "==> Done."
 
   launch_claude_onboard ""
