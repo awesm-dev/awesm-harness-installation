@@ -344,20 +344,39 @@ ensure_hermes() {
 
   echo "==> No Hermes on this machine — bringing up $HERMES_IMAGE"
   # ~/.hermes is bind-mounted as the container's data dir. The image's own user is
-  # uid 10000, so WITHOUT --user the container writes root-ish files into the host's
-  # home and locks the human out of their own ~/.hermes (mode 700, uid 10000) — the
-  # native CLI then dies reading ~/.hermes/.container-mode. Create the dir as the
-  # host user and make the container run as them.
+  # uid 10000, so left alone the container writes files the human cannot read: mode
+  # 700, uid 10000, and the native CLI then dies reading ~/.hermes/.container-mode.
+  #
+  # Do NOT fix that with --user. The image REFUSES an arbitrary uid and exits 1 in a
+  # restart loop: "container started with --user 1001 (an arbitrary, non-hermes UID)
+  # — not supported", because it breaks the s6 supervision tree. It remaps its own
+  # hermes user instead when given HERMES_UID/HERMES_GID, and chowns the data volume
+  # at boot — same ownership outcome, container actually starts.
   mkdir -p "$HOME/.hermes"
   docker pull "$HERMES_IMAGE" || { echo "!! Could not pull $HERMES_IMAGE." >&2; return 1; }
   if ! docker run -d \
       --name "$HERMES_CONTAINER" \
       --restart unless-stopped \
-      --user "$(id -u):$(id -g)" \
+      -e HERMES_UID="$(id -u)" -e HERMES_GID="$(id -g)" \
       -v "$HOME/.hermes:/opt/data" \
       -p 8642:8642 \
       "$HERMES_IMAGE" gateway run >/dev/null; then
     echo "!! Could not start the Hermes container." >&2
+    return 1
+  fi
+  # `docker run -d` returns 0 as soon as the container is CREATED — it says nothing
+  # about whether the process inside survived. A container that rejects its own
+  # arguments exits 1 and, with --restart unless-stopped, loops forever while every
+  # caller reports success. That is exactly how an unsupported flag went unnoticed.
+  # Verify it is actually running, and surface the container's own words if not.
+  sleep 3
+  hstate="$(docker inspect -f '{{.State.Status}}' "$HERMES_CONTAINER" 2>/dev/null || echo unknown)"
+  if [ "$hstate" != "running" ]; then
+    echo "!! Hermes container is '$hstate', not running — it started and died." >&2
+    echo "   Last lines from the container:" >&2
+    docker logs --tail 15 "$HERMES_CONTAINER" 2>&1 | sed 's/^/     /' >&2
+    echo "   Fix the cause above, then re-run. Leaving the container in place so the" >&2
+    echo "   logs stay readable: 'docker rm -f $HERMES_CONTAINER' to start over." >&2
     return 1
   fi
   echo "==> Hermes container '$HERMES_CONTAINER' is up (API on :8642)."
@@ -366,11 +385,11 @@ ensure_hermes() {
   # sane with a real terminal. Piped installs get the command to paste instead.
   if [ -t 0 ] && [ -z "${CLAUDECODE:-}" ]; then
     echo "==> Running Hermes first-time setup…"
-    docker run -it --rm --user "$(id -u):$(id -g)" \
+    docker run -it --rm -e HERMES_UID="$(id -u)" -e HERMES_GID="$(id -g)" \
       -v "$HOME/.hermes:/opt/data" "$HERMES_IMAGE" setup || true
   else
     echo "    One-time Hermes setup — run this in your terminal before testing an agent:"
-    echo "      docker run -it --rm --user \$(id -u):\$(id -g) \\"
+    echo "      docker run -it --rm -e HERMES_UID=\$(id -u) -e HERMES_GID=\$(id -g) \\"
     echo "        -v ~/.hermes:/opt/data $HERMES_IMAGE setup"
   fi
 }
@@ -397,8 +416,20 @@ launch_claude_onboard() {
   elif ! command -v claude >/dev/null 2>&1; then
     echo "==> Claude Code isn't installed on PATH."
   elif [ -t 0 ]; then
-    echo "==> Opening Claude Code…"
-    exec claude "/$PLUGIN_NAME:onboard"
+    # Launch a PLAIN session — never `exec claude "/<plugin>:onboard"`. The plugin was
+    # installed into this project's .claude/settings.json seconds ago, and a first-ever
+    # session in a folder must trust those project settings before plugin commands
+    # register. Dispatching the slash command at startup therefore races the trust
+    # prompt and dies with "Unknown command: /<plugin>:onboard" — the installer having
+    # just reported success. Print the command first (exec replaces this process, so
+    # nothing after it runs), then hand over a session that can answer its own prompts.
+    echo
+    echo "==> Installed. Ready at: $(pwd)"
+    echo "    Opening Claude Code. Once it has loaded, run:"
+    echo "      /$PLUGIN_NAME:onboard"
+    echo "    (If it reports an unknown command, the project settings were not trusted"
+    echo "     yet — accept the trust prompt, restart Claude Code, and run it again.)"
+    exec claude
   else
     # Piped install (curl | bash): do NOT auto-launch. Even reconnecting /dev/tty,
     # an interactive Claude launched from a pipe cannot reliably take input at its
