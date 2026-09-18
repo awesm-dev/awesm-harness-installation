@@ -627,10 +627,40 @@ else
     fi
   done
 
+  # BOTH awesm plugins enabled is the failure the marker loop above does not catch: it looks
+  # for a project's OWN .claude machinery, not for the other harness. A project that adopted
+  # the co-pilot and is now handed --agent (or the reverse) ends up with both in
+  # enabledPlugins, and they are not complementary — each ships commit-gate.sh,
+  # state-handler-reminder.sh and the graphify hooks on PreToolUse Bash, so every one of them
+  # fires twice. Observed on a real repo, not hypothetical. Refuse and name the fix; do not
+  # silently add the second.
+  OTHER_PLUGIN="awesm-harness"
+  [ "$PLUGIN_NAME" = "awesm-harness" ] && OTHER_PLUGIN="awesm-agent"
+  SETTINGS_PROBE="$(settings_path_for_scope "$SCOPE")"
+  if [ -f "$SETTINGS_PROBE" ] && grep -q "\"${OTHER_PLUGIN}@awesm\"[[:space:]]*:[[:space:]]*true" "$SETTINGS_PROBE" 2>/dev/null; then
+    echo "!! This project already has '$OTHER_PLUGIN' enabled in $SETTINGS_PROBE, and you are" >&2
+    echo "   installing '$PLUGIN_NAME'. A project runs exactly ONE of the two: they duplicate" >&2
+    echo "   every shared hook (commit-gate, state-handler-reminder, the graphify nudges), so" >&2
+    echo "   enabling both makes each fire twice on every command." >&2
+    echo >&2
+    echo "   Pick one and remove the other from enabledPlugins in that file, then re-run:" >&2
+    echo "     awesm-agent   — this project BUILDS a Hermes agent (it has a profile/ directory)" >&2
+    echo "     awesm-harness — everyday co-pilot work (web app, automation tool, marketing)" >&2
+    exit 1
+  fi
+
   if [ -d .git ]; then
-    if ! git diff --quiet 2>/dev/null || ! git diff --cached --quiet 2>/dev/null; then
+    # Ignore the settings file THIS INSTALLER writes. It was tripping on its own output: a
+    # first run writes .claude/settings.json, and every run after that sees a dirty tree and
+    # refuses, so the installer could never be re-run until someone committed the file it had
+    # just created. The gate exists to protect the USER's uncommitted work, which this is not.
+    dirty="$(git status --porcelain -- . 2>/dev/null \
+             | awk '$2 != ".claude/settings.json" && $NF != ".claude/settings.json"' \
+             | grep -v '^??' || true)"
+    if [ -n "$dirty" ]; then
       echo "!! You have uncommitted changes here. Commit or stash them first so this" >&2
-      echo "   step (and everything /onboard adds later) stays cleanly revertible." >&2
+      echo "   step (and everything /onboard adds later) stays cleanly revertible:" >&2
+      printf '%s\n' "$dirty" | sed 's/^/     /' >&2
       exit 1
     fi
   else
