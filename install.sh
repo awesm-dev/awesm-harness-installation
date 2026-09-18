@@ -219,7 +219,21 @@ except (FileNotFoundError, json.JSONDecodeError):
 known = data.setdefault("extraKnownMarketplaces", {})
 known.setdefault("awesm", {"source": {"source": "github", "repo": os.environ["MARKETPLACE_REPO"]}})
 
-data.setdefault("enabledPlugins", {})[os.environ["PLUGIN_KEY"]] = True
+# Enable the harness AND its three dependency plugins, explicitly.
+#
+# Do not rely on `claude plugin install` to enable the dependencies: it only
+# enables the ones it actually INSTALLS, so the moment a dependency is already
+# present on the machine it is skipped and never enabled in THIS project. The
+# parent plugin then reports "failed to load — Dependency X is not installed"
+# (Claude Code says "not installed" for a dependency that is merely disabled
+# here), and a plugin that fails to load has NO slash commands — which is how
+# `/<plugin>:onboard` became an unknown command straight after a green install.
+# Writing all four deterministically makes the outcome independent of what this
+# machine happened to have already.
+enabled = data.setdefault("enabledPlugins", {})
+enabled[os.environ["PLUGIN_KEY"]] = True
+for dep in ("caveman@awesm", "claude-mem@awesm", "ponytail@awesm"):
+    enabled.setdefault(dep, True)
 
 # Pre-approve project .mcp.json MCP servers (the plugin ships github + notion) so
 # the auto-opened Claude Code session doesn't stop on the first-run MCP trust
@@ -275,13 +289,20 @@ install_plugin_cli() {
   fi
   # Installed != enabled. Verify, and try once to enable it before giving up.
   if ! plugin_enabled; then
-    echo "==> $PLUGIN_KEY installed but not enabled — enabling it."
-    claude plugin enable "$PLUGIN_KEY" >/dev/null 2>&1 || true
+    echo "==> $PLUGIN_KEY is not loading — enabling it and its dependencies."
+    # A dependency that is installed-but-disabled here stops the parent loading,
+    # so enable the whole set, not just the parent.
+    for dep in "caveman@awesm" "claude-mem@awesm" "ponytail@awesm" "$PLUGIN_KEY"; do
+      claude plugin enable "$dep" >/dev/null 2>&1 || true
+    done
   fi
   if ! plugin_enabled; then
-    echo "!! $PLUGIN_KEY is installed but DISABLED. Its slash commands will not exist," >&2
-    echo "   so onboarding cannot run. Enable it and re-run:" >&2
-    echo "     claude plugin enable $PLUGIN_KEY" >&2
+    echo "!! $PLUGIN_KEY is installed but not loading, so its slash commands do not" >&2
+    echo "   exist and onboarding cannot run. Most often a DEPENDENCY is installed but" >&2
+    echo "   disabled in this project — Claude Code reports that as \"not installed\"." >&2
+    echo "   See the reason, then enable whatever it names:" >&2
+    echo "     claude plugin list" >&2
+    echo "     claude plugin enable caveman@awesm claude-mem@awesm ponytail@awesm" >&2
     return 1
   fi
 }
