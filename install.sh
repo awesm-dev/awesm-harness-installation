@@ -239,6 +239,24 @@ PYEOF
 # the chosen scope. Dependency plugins (caveman, claude-mem, ponytail) auto-
 # install once their marketplaces are registered here. Idempotent: marketplace
 # add is a no-op when already present; install is safe to re-run.
+# Is the plugin actually ENABLED here? `claude plugin install` can succeed and
+# leave the plugin installed-but-disabled — settings written to one place, the
+# install landing in another. The symptom is a slash command that does not exist
+# ("Unknown command: /<plugin>:onboard") straight after a green install, which is
+# exactly what a user hit. Parse the real state rather than trusting exit codes.
+plugin_enabled() {
+  command -v claude >/dev/null 2>&1 || return 1
+  claude plugin list 2>/dev/null | awk -v key="$PLUGIN_KEY" '
+    $0 ~ /^[[:space:]]*.[[:space:]]*[A-Za-z0-9._-]+@[A-Za-z0-9._-]+[[:space:]]*$/ {
+      cur = $NF
+    }
+    /Status:/ && cur == key {
+      if ($0 ~ /enabled/ && $0 !~ /disabled/) { found = 1 }
+    }
+    END { exit(found ? 0 : 1) }
+  '
+}
+
 install_plugin_cli() {
   if ! command -v claude >/dev/null 2>&1; then
     echo "==> claude not on PATH — settings written, but the plugin isn't installed." >&2
@@ -253,6 +271,17 @@ install_plugin_cli() {
   if ! claude plugin install "$PLUGIN_KEY" --scope "$SCOPE"; then
     echo "!! 'claude plugin install $PLUGIN_KEY' failed — check marketplace access." >&2
     echo "   Settings were still written; fix access and re-run the install command." >&2
+    return 1
+  fi
+  # Installed != enabled. Verify, and try once to enable it before giving up.
+  if ! plugin_enabled; then
+    echo "==> $PLUGIN_KEY installed but not enabled — enabling it."
+    claude plugin enable "$PLUGIN_KEY" >/dev/null 2>&1 || true
+  fi
+  if ! plugin_enabled; then
+    echo "!! $PLUGIN_KEY is installed but DISABLED. Its slash commands will not exist," >&2
+    echo "   so onboarding cannot run. Enable it and re-run:" >&2
+    echo "     claude plugin enable $PLUGIN_KEY" >&2
     return 1
   fi
 }
@@ -422,19 +451,25 @@ launch_claude_onboard() {
   elif ! command -v claude >/dev/null 2>&1; then
     echo "==> Claude Code isn't installed on PATH."
   elif [ -t 0 ]; then
-    # Launch a PLAIN session — never `exec claude "/<plugin>:onboard"`. The plugin was
-    # installed into this project's .claude/settings.json seconds ago, and a first-ever
-    # session in a folder must trust those project settings before plugin commands
-    # register. Dispatching the slash command at startup therefore races the trust
-    # prompt and dies with "Unknown command: /<plugin>:onboard" — the installer having
-    # just reported success. Print the command first (exec replaces this process, so
-    # nothing after it runs), then hand over a session that can answer its own prompts.
+    # One-command flow: hand the user a session that is ALREADY onboarding. This is
+    # the whole point of the installer, so it is restored rather than dropped.
+    #
+    # It is gated on the plugin actually being ENABLED, because that — not the
+    # dispatch — is what broke before: a plugin installed but left disabled has no
+    # slash commands, so /<plugin>:onboard is an unknown command however it is
+    # invoked, typed or dispatched. When it is not enabled we do not pretend:
+    # hand over a plain session and say what to fix. exec replaces this process,
+    # so anything worth printing must be printed first.
     echo
     echo "==> Installed. Ready at: $(pwd)"
-    echo "    Opening Claude Code. Once it has loaded, run:"
+    if plugin_enabled; then
+      echo "    Opening Claude Code and starting onboarding."
+      exec claude "/$PLUGIN_NAME:onboard"
+    fi
+    echo "    $PLUGIN_KEY is not enabled, so /$PLUGIN_NAME:onboard does not exist yet."
+    echo "    Fix it, then run the command yourself:"
+    echo "      claude plugin enable $PLUGIN_KEY"
     echo "      /$PLUGIN_NAME:onboard"
-    echo "    (If it reports an unknown command, the project settings were not trusted"
-    echo "     yet — accept the trust prompt, restart Claude Code, and run it again.)"
     exec claude
   else
     # Piped install (curl | bash): do NOT auto-launch. Even reconnecting /dev/tty,
