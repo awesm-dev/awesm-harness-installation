@@ -246,6 +246,54 @@ with open(target, "w") as f:
 PYEOF
 }
 
+# --- merge the plugin's own permissions allowlist -------------------------------
+# This used to be onboard.md's job, done as a LIVE Edit tool call from inside the very
+# Claude Code session that .claude/settings.json governs — a session editing the file that
+# controls its own current permissions, mid-session. That is exactly what a "Self-Modification"
+# safety classifier exists to catch, and it did: onboard's merge attempt was denied on a real
+# run, every time, meaning the fix for "Claude keeps asking permission" could never actually
+# land. No rewording of onboard's instructions gets past that — it is a platform boundary, not
+# a prompt-quality problem, and routing around it would be the model expanding its own
+# permissions mid-session, which is precisely what should NOT be possible.
+#
+# The fix is to do this BEFORE that governed session exists at all: plain bash, run by the
+# human via install.sh, writing the file the NEXT session will be governed by — not the current
+# one editing itself. Must run AFTER install_plugin_cli (below), because the plugin's own
+# template is what supplies the list, and it is not on disk until the plugin is actually
+# installed.
+merge_permissions_allowlist() {
+  local target="$1" tmpl=""
+  [ -f "$target" ] || return 0
+  for c in "$HOME"/.claude/plugins/marketplaces/*/plugins/"$PLUGIN_NAME"/templates/common/.claude/settings.json; do
+    [ -f "$c" ] && tmpl="$c" && break
+  done
+  if [ -z "$tmpl" ]; then
+    echo "!! could not find $PLUGIN_NAME's own settings template — the permissions allowlist" >&2
+    echo "   was not merged. Run 'claude plugin update $PLUGIN_KEY --scope $SCOPE' and re-run" >&2
+    echo "   this installer, or the project will keep prompting for routine commands." >&2
+    return 0
+  fi
+  TARGET="$target" TEMPLATE="$tmpl" python3 <<'PYEOF'
+import json, os
+target = os.environ["TARGET"]
+with open(target) as f:
+    data = json.load(f)
+with open(os.environ["TEMPLATE"]) as f:
+    tmpl_allow = ((json.load(f).get("permissions") or {}).get("allow")) or []
+if tmpl_allow:
+    allow = data.setdefault("permissions", {}).setdefault("allow", [])
+    existing = set(allow)
+    added = [e for e in tmpl_allow if e not in existing]
+    allow.extend(added)
+    with open(target, "w") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+    if added:
+        print(f"==> Merged {len(added)} permission allowlist entr{'y' if len(added)==1 else 'ies'} — "
+              "this is the actual fix for 'Claude keeps asking permission' on routine commands.")
+PYEOF
+}
+
 # --- actually install the plugin (not just declare it) -------------------------
 # merge_settings only WRITES the enable block into settings.json — that declares
 # the plugin but does NOT install its machinery, so /$PLUGIN_NAME:onboard would
@@ -597,6 +645,7 @@ if [ -n "$PROJECT_NAME" ]; then
   echo "==> Enabling awesm-harness at --scope $SCOPE ($SETTINGS_REL)"
   merge_settings "$SETTINGS_REL"
   install_plugin_cli
+  merge_permissions_allowlist "$SETTINGS_REL"
 
   ensure_hermes || true
 
@@ -673,6 +722,7 @@ else
   echo "==> Adopting awesm-harness into $(pwd) at --scope $SCOPE ($SETTINGS_REL)"
   merge_settings "$SETTINGS_REL"
   install_plugin_cli
+  merge_permissions_allowlist "$SETTINGS_REL"
   ensure_hermes || true
   echo "==> Done."
 
