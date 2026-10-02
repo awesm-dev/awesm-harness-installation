@@ -634,8 +634,12 @@ ensure_hermes() {
 # command and onboarding silently never runs.
 # $1: extra instruction line to print in the folder ("cd '<name>'" for fresh
 # mode, empty for adopt mode since we're already there).
+# $2: the command to open with: onboard (new to the harness) or harness-update (an
+# already-onboarded project re-running the installer — onboarding only fills gaps and
+# never refreshes, so sending it there left the project on the old harness files).
 launch_claude_onboard() {
-  local cd_hint="$1"
+  local cd_hint="$1" next="${2:-onboard}"
+  local what="onboarding"; [ "$next" = harness-update ] && what="the harness update"
   if [ -n "${CLAUDECODE:-}" ]; then
     echo "==> Detected an active Claude Code session — not launching a nested one."
   elif ! command -v claude >/dev/null 2>&1; then
@@ -653,13 +657,13 @@ launch_claude_onboard() {
     echo
     echo "==> Installed. Ready at: $(pwd)"
     if plugin_enabled; then
-      echo "    Opening Claude Code and starting onboarding."
-      exec claude "/$PLUGIN_NAME:onboard"
+      echo "    Opening Claude Code and starting $what."
+      exec claude "/$PLUGIN_NAME:$next"
     fi
-    echo "    $PLUGIN_KEY is not enabled, so /$PLUGIN_NAME:onboard does not exist yet."
+    echo "    $PLUGIN_KEY is not enabled, so /$PLUGIN_NAME:$next does not exist yet."
     echo "    Fix it, then run the command yourself:"
     echo "      claude plugin enable $PLUGIN_KEY"
-    echo "      /$PLUGIN_NAME:onboard"
+    echo "      /$PLUGIN_NAME:$next"
     exec claude
   else
     # Piped install (curl | bash): do NOT auto-launch. Even reconnecting /dev/tty,
@@ -668,15 +672,15 @@ launch_claude_onboard() {
     # confirmed the hard way. Industry standard: a piped installer sets up, then
     # prints the next command; the user opens Claude in a real terminal where the
     # prompts work. Local runs ([ -t 0 ] above) still auto-launch.
-    echo "==> Installed — open Claude Code yourself to start onboarding (see below)."
+    echo "==> Installed — open Claude Code yourself to start $what (see below)."
   fi
   echo
   echo "==> Installed. Ready at: $(pwd)"
-  echo "    Copy and run this one line to start onboarding:"
+  echo "    Copy and run this one line to start $what:"
   if [ -n "$cd_hint" ]; then
-    echo "      cd '$cd_hint' && claude \"/$PLUGIN_NAME:onboard\""
+    echo "      cd '$cd_hint' && claude \"/$PLUGIN_NAME:$next\""
   else
-    echo "      claude \"/$PLUGIN_NAME:onboard\""
+    echo "      claude \"/$PLUGIN_NAME:$next\""
   fi
 }
 
@@ -773,12 +777,20 @@ else
   fi
 
   SETTINGS_REL="$(settings_path_for_scope "$SCOPE")"
-  echo "==> Adopting awesm-harness into $(pwd) at --scope $SCOPE ($SETTINGS_REL)"
+  echo "==> Adopting $PLUGIN_NAME into $(pwd) at --scope $SCOPE ($SETTINGS_REL)"
   merge_settings "$SETTINGS_REL"
   install_plugin_cli
   merge_permissions_allowlist "$SETTINGS_REL"
   ensure_hermes || true
   echo "==> Done."
 
-  launch_claude_onboard ""
+  # Already onboarded (harness rules present, or CLAUDE.md carries the harness markers):
+  # bring its harness files current. Otherwise this project is new to the harness: onboard.
+  if ls .claude/rules/*.md >/dev/null 2>&1 || grep -qs 'BEGIN PROJECT-SPECIFIC' CLAUDE.md; then
+    echo "==> This project was onboarded before — opening /$PLUGIN_NAME:harness-update to bring"
+    echo "    its harness files current (it shows every change before writing)."
+    launch_claude_onboard "" harness-update
+  else
+    launch_claude_onboard ""
+  fi
 fi
