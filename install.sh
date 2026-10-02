@@ -58,13 +58,29 @@ SUDO=""; [ "$(id -u)" -ne 0 ] && have sudo && SUDO="sudo"
 
 # pkg_install <brew-name> <dnf-name> <apt-name> <apk-name>
 # Any name may be "-" to mean "not available via that manager".
+# A truly fresh apt image ships with NO package lists at all — `apt-get install` then fails
+# with "Unable to locate package X" on a package that genuinely exists, indistinguishable
+# from a real missing-package error unless you already know to run `apt-get update` first.
+# Invisible on any machine that has ever run apt for anything else, which is why this
+# survived: ensure_github_access's OWN inline gh-install had this right
+# (`apt-get update -y && apt-get install -y gh`) before it was folded into this shared
+# helper — the update step did not come along in that move. Run once per script invocation,
+# not once per package.
+APT_UPDATED=0
 pkg_install() {
   local brew_n="$1" dnf_n="$2" apt_n="$3" apk_n="$4" cmd=""
   case "$PKG" in
     brew) [ "$brew_n" != "-" ] && cmd="brew install $brew_n" ;;
     dnf)  [ "$dnf_n"  != "-" ] && cmd="$SUDO dnf install -y $dnf_n" ;;
     yum)  [ "$dnf_n"  != "-" ] && cmd="$SUDO yum install -y $dnf_n" ;;
-    apt)  [ "$apt_n"  != "-" ] && cmd="$SUDO apt-get install -y $apt_n" ;;
+    apt)
+      if [ "$apt_n" != "-" ]; then
+        if [ "$APT_UPDATED" -eq 0 ]; then
+          echo "==> $SUDO apt-get update"; $SUDO apt-get update -y || true
+          APT_UPDATED=1
+        fi
+        cmd="$SUDO apt-get install -y $apt_n"
+      fi ;;
     apk)  [ "$apk_n"  != "-" ] && cmd="$SUDO apk add $apk_n" ;;
   esac
   if [ -z "$cmd" ]; then
@@ -135,8 +151,15 @@ if [ "$SCOPE" = "user" ]; then
 fi
 
 # --- prerequisites -------------------------------------------------------------
-command -v git >/dev/null 2>&1 || { echo "!! git is required. Install git and re-run." >&2; exit 1; }
-command -v python3 >/dev/null 2>&1 || { echo "!! python3 is required. Install it and re-run." >&2; exit 1; }
+# Auto-install via pkg_install, same as gh/docker/node later in this script — a bare
+# machine hard-stopping on git of all things, when the script already knows how to
+# install everything else, was never a deliberate choice. Still a hard failure if
+# pkg_install can't (no known package manager, or a privilege it can't get), because
+# there is genuinely nothing else this script can do at that point.
+command -v git >/dev/null 2>&1 || pkg_install git git git git \
+  || { echo "!! git is required and could not be auto-installed. Install it yourself, then re-run." >&2; exit 1; }
+command -v python3 >/dev/null 2>&1 || pkg_install python3 python3 python3 python3 \
+  || { echo "!! python3 is required and could not be auto-installed. Install it yourself, then re-run." >&2; exit 1; }
 
 # --- ensure GitHub access (gh installed + logged in + git over HTTPS) ----------
 # The harness repo is PRIVATE, so cloning it needs a GitHub login; the dependency
@@ -148,9 +171,13 @@ command -v python3 >/dev/null 2>&1 || { echo "!! python3 is required. Install it
 ensure_github_access() {
   if ! command -v gh >/dev/null 2>&1; then
     echo "==> GitHub CLI (gh) not found — installing…"
-    if command -v brew >/dev/null 2>&1; then brew install gh
-    elif command -v apt-get >/dev/null 2>&1; then sudo apt-get update -y && sudo apt-get install -y gh
-    else echo "!! Install GitHub CLI (https://cli.github.com), then re-run." >&2; exit 1; fi
+    # Was hardcoded to `sudo apt-get`, unconditionally — wrong twice over: it ran even as
+    # root, where `sudo` may not exist at all (a bare container's most common shape) and
+    # is never needed; and it had no dnf/yum/apk branch, so Fedora/RHEL/Alpine got a dead
+    # end regardless of privilege. pkg_install already solves both (the shared $SUDO
+    # variable IS root-aware) — use it instead of a second, divergent copy of this logic.
+    pkg_install gh gh gh github-cli \
+      || { echo "!! Install GitHub CLI (https://cli.github.com), then re-run." >&2; exit 1; }
   fi
   if ! gh auth status >/dev/null 2>&1; then
     if [ -t 0 ]; then
