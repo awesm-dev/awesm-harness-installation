@@ -289,9 +289,25 @@ PYEOF
 # template is what supplies the list, and it is not on disk until the plugin is actually
 # installed.
 merge_permissions_allowlist() {
-  local target="$1" tmpl=""
+  local target="$1" tmpl="" root
   [ -f "$target" ] || return 0
-  for c in "$HOME"/.claude/plugins/marketplaces/*/plugins/"$PLUGIN_NAME"/templates/common/.claude/settings.json; do
+  # First choice: the exact copy installed for THIS project (its installPath). It is the only
+  # place a plugin hosted outside the marketplace repo — awesm-agent, git-subdir since
+  # 2026-10-02 — exists on disk; the marketplace checkout no longer contains it.
+  root="$(PLUGIN_KEY="$PLUGIN_KEY" HERE="$PWD" python3 - <<'PYEOF' 2>/dev/null || true
+import json, os
+try:
+    d = json.load(open(os.path.expanduser("~/.claude/plugins/installed_plugins.json")))
+except Exception:
+    raise SystemExit(0)
+here = os.path.realpath(os.environ["HERE"])
+for e in d.get("plugins", {}).get(os.environ["PLUGIN_KEY"], []):
+    if e.get("projectPath") and os.path.realpath(e["projectPath"]) == here:
+        print(e.get("installPath", "")); break
+PYEOF
+)"
+  for c in "$root/templates/common/.claude/settings.json" \
+           "$HOME"/.claude/plugins/marketplaces/*/plugins/"$PLUGIN_NAME"/templates/common/.claude/settings.json; do
     [ -f "$c" ] && tmpl="$c" && break
   done
   if [ -z "$tmpl" ]; then
@@ -392,9 +408,20 @@ install_plugin_cli() {
   # that is about to hand over a session. So compare versions and, when they
   # differ, uninstall the stale copy before installing — that is the only thing
   # that reliably lands the current version in this run.
+  # The marketplace checkout only holds plugins that live IN the marketplace repo. awesm-agent
+  # moved to awesm-dev/agent-builder-harness (git-subdir source) on 2026-10-02, so its
+  # plugin.json is not there: `want` is then empty. Under `set -euo pipefail` the failing `cat`
+  # used to end the whole script silently right here, so every --agent install stopped
+  # after "Installing awesm-agent@awesm". Never let this lookup be fatal.
   want="$(cat "$HOME/.claude/plugins/marketplaces/awesm/plugins/$PLUGIN_NAME/.claude-plugin/plugin.json" 2>/dev/null \
-          | python3 -c 'import json,sys; print(json.load(sys.stdin).get("version",""))' 2>/dev/null)"
-  have="$(plugin_installed_version)"
+          | python3 -c 'import json,sys; print(json.load(sys.stdin).get("version",""))' 2>/dev/null || true)"
+  have="$(plugin_installed_version || true)"
+  if [ -z "$want" ] && [ -n "$have" ]; then
+    # Version unknown here (plugin hosted elsewhere): let Claude Code fetch it. `update` is a
+    # no-op when current; a newer version lands in the session this script opens next.
+    echo "==> $PLUGIN_KEY [$have] already installed here — checking for a newer version."
+    claude plugin update "$PLUGIN_KEY" --scope "$SCOPE" 2>&1 | sed 's/^/    /' || true
+  fi
   if [ -n "$want" ] && [ -n "$have" ] && [ "$have" != "$want" ]; then
     echo "==> Installed $PLUGIN_KEY is [$have], marketplace has [$want] — replacing."
     # `uninstall` REFUSES while the plugin is enabled at project scope, and
@@ -669,7 +696,7 @@ if [ -n "$PROJECT_NAME" ]; then
   git init -q
 
   SETTINGS_REL="$(settings_path_for_scope "$SCOPE")"
-  echo "==> Enabling awesm-harness at --scope $SCOPE ($SETTINGS_REL)"
+  echo "==> Enabling $PLUGIN_NAME at --scope $SCOPE ($SETTINGS_REL)"
   merge_settings "$SETTINGS_REL"
   install_plugin_cli
   merge_permissions_allowlist "$SETTINGS_REL"
